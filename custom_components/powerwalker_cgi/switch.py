@@ -1,43 +1,39 @@
+import aiohttp
 from homeassistant.components.switch import SwitchEntity
-import requests
+from homeassistant.helpers.entity import DeviceInfo
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
-    host = config_entry.data["host"]
-    auth = (config_entry.data.get("username"), config_entry.data.get("password", ""))
-    
+    data = config_entry.data
+    protocol = "https" if data.get("use_https") else "http"
+    base_url = f"{protocol}://{data['host']}:{data['port']}"
+    auth = (data.get("username"), data.get("password", ""))
+    host = data['host']
+
     async_add_entities([
-        PWConfigSwitch(host, auth, "Alarm Control", "alarmCtrl"),
-        PWPowerSwitch(host, auth, "System Power", "ups")
-    ])
+        PWSwitch(base_url, auth, host, "Alarm Control", "alarmCtrl", "config.cgi"),
+        PWSwitch(base_url, auth, host, "System Power", "ups", "rtControl.cgi")
+    ], update_before_add=True)
 
-class PWConfigSwitch(SwitchEntity):
-    """For persistent settings like Alarms"""
-    def __init__(self, host, auth, name, mask):
-        self._host, self._auth, self._mask = host, auth, mask
+class PWSwitch(SwitchEntity):
+    def __init__(self, base_url, auth, host, name, mask, endpoint):
+        self._base_url, self._auth, self._mask, self._endpoint = base_url, auth, mask, endpoint
         self._attr_name = f"UPS {name}"
-        self._is_on = False
-
-    def turn_on(self, **kwargs):
-        requests.get(f"http://{self._host}/cgi-bin/config.cgi?name={self._mask}&?params=1&", auth=self._auth)
+        self._attr_unique_id = f"pw_{host}_{name.lower().replace(' ', '_')}"
+        self._attr_device_info = DeviceInfo(identifiers={("powerwalker_cgi", host)}, name="PowerWalker UPS")
         self._is_on = True
 
-    def turn_off(self, **kwargs):
-        requests.get(f"http://{self._host}/cgi-bin/config.cgi?name={self._mask}&?params=0&", auth=self._auth)
-        self._is_on = False
-
-class PWPowerSwitch(SwitchEntity):
-    """For Momentary Power Toggle"""
-    def __init__(self, host, auth, name, mask):
-        self._host, self._auth, self._mask = host, auth, mask
-        self._attr_name = f"UPS {name}"
-
     @property
-    def is_on(self):
-        # We assume it's on if we can reach the API
-        return True 
+    def is_on(self): return self._is_on
 
-    def turn_on(self, **kwargs):
-        requests.get(f"http://{self._host}/cgi-bin/rtControl.cgi?name={self._mask}&?params=1&", auth=self._auth)
+    async def _send_cmd(self, param):
+        url = f"{self._base_url}/cgi-bin/{self._endpoint}?name={self._mask}&?params={param}&"
+        async with aiohttp.ClientSession() as session:
+            await session.get(url, auth=aiohttp.BasicAuth(self._auth[0], self._auth[1]), ssl=False)
 
-    def turn_off(self, **kwargs):
-        requests.get(f"http://{self._host}/cgi-bin/rtControl.cgi?name={self._mask}&?params=0&", auth=self._auth)
+    async def async_turn_on(self, **kwargs):
+        await self._send_cmd(1)
+        self._is_on = True
+
+    async def async_turn_off(self, **kwargs):
+        await self._send_cmd(0)
+        self._is_on = False
