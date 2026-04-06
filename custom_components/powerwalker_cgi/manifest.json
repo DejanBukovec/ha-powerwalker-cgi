@@ -2,9 +2,10 @@
   "domain": "powerwalker_cgi",
   "name": "PowerWalker CGI Integration",
   "documentation": "https://github.com/DejanBukovec/ha-powerwalker-cgi",
+  "issue_tracker": "https://github.com/DejanBukovec/ha-powerwalker-cgi/issues",
   "dependencies": [],
   "codeowners": ["@DejanBukovec"],
-  "version": "1.0.2",
+  "version": "1.0.3",
   "iot_class": "local_polling",
   "config_flow": true
 }

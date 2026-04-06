@@ -7,14 +7,28 @@ Architecture:
   - sensor.py, switch.py and button.py all read from coordinator.data —
     zero additional HTTP requests on update.
   - Controls (switches/buttons) call _send_command() which does a fresh
-    login + command over a single persistent TCP session. Login is only
-    needed for write operations, never for reads.
+    login + command over a single persistent TCP session.
 
 coordinator.data structure:
   {
       "sensors":  list[str],   # newline-split tokens from realInfo.cgi
-      "controls": list[str],   # space-split tokens from getControl.cgi
+      "controls": list[str],   # newline-split tokens from getControl.cgi
   }
+
+getControl.cgi raw response (newline-separated):
+  Line 0: "1"  → (ignored / header)
+  Line 1: "1"  → alarm state     (1 = ON,  other = OFF)
+  Line 2: "1"  → UPS output ON   (1 = ON,  other = OFF)
+  Line 3: "1"  → test running    (1 = test active)
+  Line 4: "2"  → outlet control
+  Line 5: "30" → outlet off delay
+  Line 6: "30" → outlet on delay
+  Line 7: "0"  → reboot off delay
+  Line 8: "0"  → reboot on delay
+
+Verified from two real device responses:
+  UPS ON:  1 / 1 / 1 / 1 / 2 / 30 / 30 / 0 / 0
+  UPS OFF: 1 / 1 / 0 / 0 / 2 / 30 / 30 / 0 / 0
 """
 
 import asyncio
@@ -36,12 +50,7 @@ PLATFORMS = ["sensor", "switch", "button"]
 _HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _sid() -> str:
-    """Generate a random SID that mimics the browser JS Math.random() calls."""
     return str(random.random())
 
 
@@ -49,7 +58,7 @@ async def _fetch_coordinator_data(base_url: str) -> dict:
     """
     Fetch realInfo.cgi and getControl.cgi without authentication.
     Both endpoints are publicly readable — no login needed for GET.
-    Returns a dict with 'sensors' and 'controls' token lists.
+    Both return newline-separated values.
     """
     sensor_url  = f"{base_url}/cgi-bin/realInfo.cgi?{_sid()}"
     control_url = f"{base_url}/cgi-bin/getControl.cgi?{_sid()}"
@@ -66,14 +75,11 @@ async def _fetch_coordinator_data(base_url: str) -> dict:
             ) as resp:
                 control_raw = await resp.text()
 
-        # realInfo.cgi — newline-separated, one value per line
-        sensor_tokens = [t.strip() for t in sensor_raw.strip().split("\n") if t.strip()]
+        # Both CGI responses are newline-separated, one value per line
+        sensor_tokens  = [t.strip() for t in sensor_raw.strip().split("\n")  if t.strip()]
+        control_tokens = [t.strip() for t in control_raw.strip().split("\n") if t.strip()]
 
-        # getControl.cgi — single space-separated line; prepend a dummy [0]
-        # so that JS indices (r_v[1], r_v[2]…) map directly to list indices.
-        control_tokens = ["_"] + control_raw.strip().split()
-
-        _LOGGER.debug("sensor tokens  (%d): %s", len(sensor_tokens), sensor_tokens)
+        _LOGGER.debug("sensor  tokens (%d): %s", len(sensor_tokens),  sensor_tokens)
         _LOGGER.debug("control tokens (%d): %s", len(control_tokens), control_tokens)
 
         return {"sensors": sensor_tokens, "controls": control_tokens}
@@ -88,10 +94,10 @@ async def _send_command(base_url: str, password: str, cgi_name: str, value: str)
     The UPS card tracks auth state per TCP socket, so both requests must share
     the same aiohttp.TCPConnector instance.
 
-    URL format reverse-engineered from the UPS page JS:
+    URL format from the UPS page JS:
       makeRequest("/cgi-bin/rtControl.cgi?name=" + mask + "&?params=" + value + "&", 1)
       → appends "?sid=" + Math.random()
-      → final URL: rtControl.cgi?name=X&?params=Y&?sid=0.123
+      → final: rtControl.cgi?name=X&?params=Y&?sid=0.123
     """
     login_url = (
         f"{base_url}/cgi-bin/rtControl.cgi"
@@ -105,17 +111,14 @@ async def _send_command(base_url: str, password: str, cgi_name: str, value: str)
     connector = aiohttp.TCPConnector(ssl=False, force_close=False)
     try:
         async with aiohttp.ClientSession(connector=connector, headers=_HEADERS) as session:
-            # Step 1 — authenticate
             async with session.get(login_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 login_resp = await resp.text()
                 _LOGGER.debug("Login response: %s", login_resp.strip())
                 if "(ACK" not in login_resp:
                     _LOGGER.warning("Login may have failed: %s", login_resp.strip())
 
-            # Brief pause — legacy firmware needs time to register the session
             await asyncio.sleep(0.4)
 
-            # Step 2 — send command on the same TCP connection
             async with session.get(cmd_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 result = await resp.text()
                 _LOGGER.debug("Command %s=%s → %s", cgi_name, value, result.strip())
@@ -133,15 +136,11 @@ async def _send_command(base_url: str, password: str, cgi_name: str, value: str)
         await connector.close()
 
 
-# ---------------------------------------------------------------------------
-# HA entry points
-# ---------------------------------------------------------------------------
-
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     protocol = "https" if entry.data.get("use_https") else "http"
-    base_url = f"{protocol}://{entry.data['host']}:{entry.data['port']}"
-    password = entry.data.get("password", "")
-    interval = timedelta(seconds=entry.data.get("scan_interval", 30))
+    base_url  = f"{protocol}://{entry.data['host']}:{entry.data['port']}"
+    password  = entry.data.get("password", "")
+    interval  = timedelta(seconds=entry.data.get("scan_interval", 30))
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -151,7 +150,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         update_interval=interval,
     )
 
-    # Perform the first fetch before platforms register their entities
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})
@@ -168,7 +166,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload the integration when options are changed via the UI."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 

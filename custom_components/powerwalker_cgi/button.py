@@ -1,8 +1,7 @@
 """
 PowerWalker CGI — Button platform.
 
-Buttons trigger one-shot UPS test commands via _send_command().
-CGI names and parameter values taken directly from the UPS HTML source:
+CGI names and values from the UPS HTML source:
   setControl('test10s','10')
   setControl('testDeep','deep')
   setControl('cancel','cn')
